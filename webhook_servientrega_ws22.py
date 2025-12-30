@@ -454,8 +454,27 @@ def webhook():
             "shipping_weight",
             "weight",
             "move_ids",
+            "x_studio_servientrega",
+            "carrier_id",
         ],
     )
+
+    # VALIDACIÓN DUAL: Check O Transportista
+    es_check = picking.get("x_studio_servientrega")
+    es_carrier = False
+    if picking.get("carrier_id"):
+        # carrier_id es [id, "Nombre"]
+        c_name = str(picking["carrier_id"][1]).upper()
+        if "SERVIENTREGA" in c_name:
+            es_carrier = True
+
+    if not (es_check or es_carrier):
+        logger.info(
+            "🚫 No es Servientrega (Check=%s, Carrier=%s). Saltando.",
+            es_check,
+            es_carrier,
+        )
+        return jsonify({"ok": True, "skipped": True}), 200
     partner = safe_read_one(
         "res.partner",
         picking["partner_id"][0],
