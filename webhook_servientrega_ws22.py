@@ -483,23 +483,23 @@ def webhook():
             400,
         )
 
-    picking = safe_read_one(
-        "stock.picking",
-        picking_id,
-        [
-            "id",
-            "name",
-            "state",
-            "carrier_tracking_ref",
-            "move_line_ids",
-            "partner_id",
-            "shipping_weight",
-            "weight",
-            "move_ids",
-            "x_studio_servientrega",
-            "carrier_id",
-        ],
-    )
+    # 📋 Determinar campos a leer (Evita error si x_studio_servientrega no existe en Prod)
+    fields_to_read = [
+        "id",
+        "name",
+        "state",
+        "carrier_tracking_ref",
+        "move_line_ids",
+        "partner_id",
+        "shipping_weight",
+        "weight",
+        "move_ids",
+        "carrier_id",
+    ]
+    if not USE_PRODUCTION:
+        fields_to_read.append("x_studio_servientrega")
+
+    picking = safe_read_one("stock.picking", picking_id, fields_to_read)
 
     if not picking:
         return error_response(
@@ -528,15 +528,19 @@ def webhook():
             200,
         )
 
-    # VALIDACIÓN DUAL: Check O Transportista
-    es_check = picking.get("x_studio_servientrega")
+    # 🏁 VALIDACIÓN: ¿Es Servientrega?
+    # En producción solo usamos carrier_id. En pruebas usamos carrier_id O el check.
     es_carrier = False
     if picking.get("carrier_id"):
         c_name = str(picking["carrier_id"][1]).upper()
         if "SERVIENTREGA" in c_name:
             es_carrier = True
 
-    if not (es_check or es_carrier):
+    es_check = False
+    if not USE_PRODUCTION:
+        es_check = picking.get("x_studio_servientrega")
+
+    if not (es_carrier or es_check):
         logger.info(
             "🚫 No es Servientrega (Check=%s, Carrier=%s). Saltando.",
             es_check,
@@ -570,11 +574,37 @@ def webhook():
     if valor_total < 5000:
         valor_total = 5000
 
-    # Obtener nombres de productos
-    nombres = [m["product_id"][1] for m in moves if m.get("product_id")]
-    contenido = ", ".join(nombres)[:35]
+    # --- MEJORA: Limpieza de nombres para la guía (Max 50 chars) ---
+    logger.info(
+        "🔍 Productos encontrados en stock.move: %s",
+        [m["product_id"][1] for m in moves if m.get("product_id")],
+    )
+
+    nombres_cortos = []
+    for m in moves:
+        if m.get("product_id"):
+            full_name = m["product_id"][1]
+
+            # 1. Intentar tomar lo que hay después del ]
+            if "]" in full_name:
+                name_after_bracket = full_name.split("]", 1)[1].strip()
+            else:
+                name_after_bracket = full_name.strip()
+
+            # 2. Tomar las dos primeras palabras
+            words = name_after_bracket.split()
+            short_name = " ".join(words[:2])
+
+            if short_name:
+                nombres_cortos.append(short_name)
+
+    # Unir productos y recortar a 50 caracteres (Límite de la API)
+    contenido = ", ".join(nombres_cortos)[:50]
+
     if not contenido:
         contenido = "MERCANCIA GENERAL"
+
+    logger.info("📦 Contenido final para la guía: %s", contenido)
 
     ws22_payload = construir_payload_ws22(
         picking, partner, valor_real=valor_total, contenido=contenido
