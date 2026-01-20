@@ -465,6 +465,18 @@ def webhook():
     payload = request.get_json(silent=True) or {}
     logger.info("Payload recibido: %s", payload)
 
+    # 🛑 FILTRO DE SEGURIDAD: Solo procesar stock.picking
+    # Evita el ruido de otros webhooks (como Instagram/mail.message)
+    modelo = payload.get("_model")
+    if modelo and modelo != "stock.picking":
+        logger.info(
+            "⏭️ Ignorando webhook del modelo: %s (Solo procesamos stock.picking)", modelo
+        )
+        return (
+            jsonify({"ok": True, "skipped": True, "reason": "non_picking_model"}),
+            200,
+        )
+
     # Buscamos el ID en 'id' o en '_id' (formato común en Odoo)
     picking_id = payload.get("id") or payload.get("_id")
 
