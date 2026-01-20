@@ -37,13 +37,39 @@ SERVI_TIMEOUT = int(os.getenv("SERVI_TIMEOUT", "35"))
 if not SERVI_URL:
     raise RuntimeError("No se pudo determinar SERVI_URL (faltan variables en .env)")
 
+
 # --------------------------------------------------
-# LOGGING
+# LOGGING (CON COLORES)
 # --------------------------------------------------
+class ColorFormatter(logging.Formatter):
+    grey = "\x1b[38;20m"
+    yellow = "\x1b[33;20m"
+    red = "\x1b[31;20m"
+    bold_red = "\x1b[31;1m"
+    green = "\x1b[32;20m"
+    reset = "\x1b[0m"
+    format_str = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+
+    FORMATS = {
+        logging.DEBUG: grey + format_str + reset,
+        logging.INFO: green + format_str + reset,
+        logging.WARNING: yellow + format_str + reset,
+        logging.ERROR: red + format_str + reset,
+        logging.CRITICAL: bold_red + format_str + reset,
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        formatter = logging.Formatter(log_fmt)
+        return formatter.format(record)
+
+
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColorFormatter())
+
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    handlers=[logging.StreamHandler(sys.stdout)],
+    handlers=[handler],
 )
 logger = logging.getLogger("servientrega_webhook")
 
