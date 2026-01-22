@@ -149,10 +149,20 @@ def validate_picking(picking, shipping_partner_id):
 def construir_payload_ws22(picking, partner, valor_real=5000, contenido="PRODUCTOS"):
     logger.info("🧩 Construyendo payload WS22")
 
-    # Peso Dínámico (Mínimo 1kg)
-    peso_real = float(picking.get("shipping_weight") or picking.get("weight") or 1.0)
+    # Peso Dinámico: Prioridad al automático (weight), luego al manual (shipping_weight)
+    peso_calculado = float(picking.get("weight") or 0.0)
+    peso_manual = float(picking.get("shipping_weight") or 0.0)
+
+    # Lógica de prioridad: 1. weight -> 2. shipping_weight -> 3. 1.0 (mínimo)
+    peso_real = (
+        peso_calculado
+        if peso_calculado > 0
+        else (peso_manual if peso_manual > 0 else 1.0)
+    )
+
     if peso_real < 1:
-        peso_real = 1.0
+        # Servientrega a veces da problema con menos de 1kg, pero permitimos que el script capture el valor real
+        logger.info("⚠️ Peso detectado menor a 1kg (%s), usando valor real.", peso_real)
 
     # Valor Declarado Dinámico (Mínimo 5000)
     valor_declarado = 0.0
