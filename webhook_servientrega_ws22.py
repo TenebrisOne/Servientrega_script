@@ -39,6 +39,25 @@ if not SERVI_URL:
 
 
 # --------------------------------------------------
+# CONFIGURACIÓN DE CAMPOS POR AMBIENTE (QA vs PROD)
+# --------------------------------------------------
+if USE_PRODUCTION:
+    # 🚀 NOMBRES DE CAMPOS EN PRODUCCIÓN (wondertechsas)
+    CAMPOS = {
+        "check_servientrega": "x_studio_servientrega",  # Ajustar si en Prod se llama diferente
+        "contador_paquetes": "x_studio_numero_de_paquetes",  # Ajustar nombre real de Prod
+        "historial_paquetes": "x_studio_paquetes_transferidos",  # Ajustar nombre real de Prod
+    }
+else:
+    # 🧪 NOMBRES DE CAMPOS EN QA (edu-wondertech-juan-pablo2)
+    CAMPOS = {
+        "check_servientrega": "x_studio_servientrega",
+        "contador_paquetes": "packages_count",
+        "historial_paquetes": "package_history_ids",
+    }
+
+
+# --------------------------------------------------
 # LOGGING (CON COLORES)
 # --------------------------------------------------
 class ColorFormatter(logging.Formatter):
@@ -146,7 +165,9 @@ def validate_picking(picking, shipping_partner_id):
 # --------------------------------------------------
 # WS22 PAYLOAD
 # --------------------------------------------------
-def construir_payload_ws22(picking, partner, valor_real=5000, contenido="PRODUCTOS"):
+def construir_payload_ws22(
+    picking, partner, valor_real=5000, contenido="PRODUCTOS", paquetes_info=None
+):
     logger.info("🧩 Construyendo payload WS22")
 
     # Peso Dinámico: Prioridad al automático (weight), luego al manual (shipping_weight)
@@ -154,26 +175,53 @@ def construir_payload_ws22(picking, partner, valor_real=5000, contenido="PRODUCT
     peso_manual = float(picking.get("shipping_weight") or 0.0)
 
     # Lógica de prioridad: 1. weight -> 2. shipping_weight -> 3. 1.0 (mínimo)
-    peso_real = (
+    peso_total = (
         peso_calculado
         if peso_calculado > 0
         else (peso_manual if peso_manual > 0 else 1.0)
     )
 
-    if peso_real < 1:
-        # Servientrega a veces da problema con menos de 1kg, pero permitimos que el script capture el valor real
-        logger.info("⚠️ Peso detectado menor a 1kg (%s), usando valor real.", peso_real)
+    if peso_total < 1:
+        logger.info("⚠️ Peso detectado menor a 1kg (%s), usando valor real.", peso_total)
 
-    # Valor Declarado Dinámico (Mínimo 5000)
-    valor_declarado = 0.0
-    # Intentar calcular valor desde los movimientos de stock (precio del producto * cantidad)
-    # Nota: Odoo devuelve los IDs, habría que haber leído los moves.
-    # Para simplificar y no hacer más lecturas costosas, si no tenemos valor, usamos 5000.
-    # Si quieres valor exacto, necesitamos leer 'stock.move' con 'price_unit' y 'product_uom_qty'.
-    # Por ahora, usaré una lógica segura:
-    valor_declarado = 5000.0  # Placeholder seguro.
-    # TODO: Si el usuario quiere VALOR REAL, debemos leer los moves.
-    # Voy a implementar la lectura de moves abajo en el webhook() para pasarla aquí.
+    num_piezas = len(paquetes_info) if paquetes_info else 1
+
+    # Si hay paquetes, intentamos distribuir el peso o usar el peso individual
+    lista_empaques = []
+    if paquetes_info:
+        for idx, pkg in enumerate(paquetes_info):
+            # Dividimos el peso total entre las piezas para que sume exacto.
+            peso_pieza = round(peso_total / num_piezas, 2)
+            if peso_pieza < 0.1:
+                peso_pieza = 0.1  # Mínimo por pieza
+
+            # Usamos el nombre real del paquete de Odoo (ej. PACK001)
+            nombre_caja = pkg.get("name", f"{idx+1}")
+
+            lista_empaques.append(
+                {
+                    "alto": 5,
+                    "ancho": 5,
+                    "largo": 5,
+                    "peso": peso_pieza,
+                    "dice_contener": contenido,
+                    "numero_caja": nombre_caja,
+                    "valor_declarado": round(valor_real / num_piezas, 2),
+                }
+            )
+    else:
+        # Un solo bulto estándar
+        lista_empaques.append(
+            {
+                "alto": 5,
+                "ancho": 5,
+                "largo": 5,
+                "peso": peso_total,
+                "dice_contener": contenido,
+                "numero_caja": "1",
+                "valor_declarado": valor_real,
+            }
+        )
 
     payload = {
         "envios": [
@@ -182,9 +230,10 @@ def construir_payload_ws22(picking, partner, valor_real=5000, contenido="PRODUCT
                 "contenido": contenido,
                 "tipoEnvio": "NORMAL",
                 "formaPago": "CREDITO",
-                "numeroPiezas": 1,
-                "pesoTotal": peso_real,
+                "numeroPiezas": num_piezas,
+                "pesoTotal": peso_total,
                 "valorDeclarado": valor_real,
+                "empaques": lista_empaques,
                 "remitente": {
                     "nombre": "WONDERTECH S.A.S",
                     "direccion": "Cra 00 #00-00",
@@ -204,7 +253,7 @@ def construir_payload_ws22(picking, partner, valor_real=5000, contenido="PRODUCT
         ]
     }
 
-    logger.info("📦 Payload WS22 construido correctamente")
+    logger.info("📦 Payload WS22 construido correctamente (%s piezas)", num_piezas)
     return payload
 
 
@@ -216,6 +265,32 @@ def enviar_ws22_test(payload_ws22: dict) -> dict:
     logger.info("🌐 URL usada: %s", SERVI_URL)
 
     envio = payload_ws22["envios"][0]
+
+    # --- GENERACIÓN DINÁMICA DE NODOS DE EMPAQUE (BULTOS) ---
+    empaques_xml = ""
+    for idx, pkg in enumerate(envio["empaques"]):
+        empaques_xml += f"""<tem:EnviosUnidadEmpaqueCargue>
+    <tem:Num_Alto>{pkg['alto']}</tem:Num_Alto>
+    <tem:Num_Distribuidor>0</tem:Num_Distribuidor>
+    <tem:Num_Ancho>{pkg['ancho']}</tem:Num_Ancho>
+    <tem:Num_Cantidad>1</tem:Num_Cantidad>
+    <tem:Des_DiceContener>{pkg['dice_contener']}</tem:Des_DiceContener>
+    <tem:Des_IdArchivoOrigen>123</tem:Des_IdArchivoOrigen>
+    <tem:Num_Largo>{pkg['largo']}</tem:Num_Largo>
+    <tem:Nom_UnidadEmpaque>GENERICA</tem:Nom_UnidadEmpaque>
+    <tem:Num_Peso>{pkg['peso']}</tem:Num_Peso>
+    <tem:Des_UnidadLongitud>cm</tem:Des_UnidadLongitud>
+    <tem:Des_UnidadPeso>kg</tem:Des_UnidadPeso>
+    <tem:Ide_UnidadEmpaque>00000000-0000-0000-0000-000000000000</tem:Ide_UnidadEmpaque>
+    <tem:Ide_Envio>00000000-0000-0000-0000-000000000000</tem:Ide_Envio>
+    <tem:Num_Volumen>0</tem:Num_Volumen>
+    <tem:Num_Consecutivo>{idx}</tem:Num_Consecutivo>
+    <tem:Cod_Facturacion></tem:Cod_Facturacion>
+    <tem:Num_ValorDeclarado>{pkg['valor_declarado']}</tem:Num_ValorDeclarado>
+    <tem:Indicador>1</tem:Indicador>
+    <tem:NumeroDeCaja>{pkg['numero_caja']}</tem:NumeroDeCaja>
+    <tem:Id_archivo></tem:Id_archivo>
+</tem:EnviosUnidadEmpaqueCargue>"""
 
     soap_xml = f"""<soap:Envelope xmlns:soap="http://www.w3.org/2003/05/soap-envelope" xmlns:tem="http://tempuri.org/">
    <soap:Header>
@@ -300,28 +375,7 @@ def enviar_ws22_test(payload_ws22: dict) -> dict:
                      <tem:Nom_RemitenteCanal></tem:Nom_RemitenteCanal>
                      <tem:Des_IdArchivoOrigen>123</tem:Des_IdArchivoOrigen>
                      <tem:objEnviosUnidadEmpaqueCargue>
-                        <tem:EnviosUnidadEmpaqueCargue>
-                           <tem:Num_Alto>5</tem:Num_Alto>
-                           <tem:Num_Distribuidor>0</tem:Num_Distribuidor>
-                           <tem:Num_Ancho>5</tem:Num_Ancho>
-                           <tem:Num_Cantidad>1</tem:Num_Cantidad>
-                           <tem:Des_DiceContener>{envio["contenido"]}</tem:Des_DiceContener>
-                           <tem:Des_IdArchivoOrigen>123</tem:Des_IdArchivoOrigen>
-                           <tem:Num_Largo>5</tem:Num_Largo>
-                           <tem:Nom_UnidadEmpaque>GENERICA</tem:Nom_UnidadEmpaque>
-                           <tem:Num_Peso>1</tem:Num_Peso>
-                           <tem:Des_UnidadLongitud>cm</tem:Des_UnidadLongitud>
-                           <tem:Des_UnidadPeso>kg</tem:Des_UnidadPeso>
-                           <tem:Ide_UnidadEmpaque>00000000-0000-0000-0000-000000000000</tem:Ide_UnidadEmpaque>
-                           <tem:Ide_Envio>00000000-0000-0000-0000-000000000000</tem:Ide_Envio>
-                           <tem:Num_Volumen>0</tem:Num_Volumen>
-                           <tem:Num_Consecutivo>0</tem:Num_Consecutivo>
-                           <tem:Cod_Facturacion></tem:Cod_Facturacion>
-                           <tem:Num_ValorDeclarado>{envio["valorDeclarado"]}</tem:Num_ValorDeclarado>
-                           <tem:Indicador>1</tem:Indicador>
-                           <tem:NumeroDeCaja></tem:NumeroDeCaja>
-                           <tem:Id_archivo></tem:Id_archivo>
-                        </tem:EnviosUnidadEmpaqueCargue>
+                        {empaques_xml}
                      </tem:objEnviosUnidadEmpaqueCargue>
                   </tem:EnviosExterno>
                </tem:objEnvios>
@@ -335,7 +389,9 @@ def enviar_ws22_test(payload_ws22: dict) -> dict:
         "Content-Type": "text/xml; charset=utf-8",
     }
 
-    logger.info("📤 SOAP XML ENVIADO:\n%s", soap_xml)
+    logger.info(
+        "📤 SOAP XML ENVIADO (Con %s bultos):\n%s", envio["numeroPiezas"], soap_xml
+    )
 
     resp = requests.post(
         SERVI_URL,
@@ -544,9 +600,11 @@ def webhook():
         "weight",
         "move_ids",
         "carrier_id",
+        CAMPOS["historial_paquetes"],
+        CAMPOS["contador_paquetes"],
     ]
-    if not USE_PRODUCTION:
-        fields_to_read.append("x_studio_servientrega")
+    if not USE_PRODUCTION or CAMPOS["check_servientrega"]:
+        fields_to_read.append(CAMPOS["check_servientrega"])
 
     picking = safe_read_one("stock.picking", picking_id, fields_to_read)
 
@@ -655,8 +713,43 @@ def webhook():
 
     logger.info("📦 Contenido final para la guía: %s", contenido)
 
+    # 📦 DETECCIÓN DE PAQUETES (Múltiples bultos) - USANDO packages_count
+    # Como el JSON no puede traer los IDs de paquetes de otros modelos,
+    # usamos el contador para generar bultos virtuales.
+
+    # 1. Obtener el número de paquetes del JSON o consultarlo a Odoo
+    # 1. Obtener el número de paquetes del JSON o consultarlo a Odoo
+    num_paquetes = int(picking.get(CAMPOS["contador_paquetes"]) or 0)
+
+    if num_paquetes == 0:
+        # Si el JSON no trae el contador, consultamos a Odoo directamente
+        logger.info(
+            "🔍 %s=0 en JSON. Consultando Odoo directamente...",
+            CAMPOS["contador_paquetes"],
+        )
+        fresh_picking = safe_read_one(
+            "stock.picking", picking_id, [CAMPOS["contador_paquetes"]]
+        )
+        if fresh_picking:
+            num_paquetes = int(fresh_picking.get(CAMPOS["contador_paquetes"]) or 0)
+            logger.info("📊 %s en Odoo: %s", CAMPOS["contador_paquetes"], num_paquetes)
+
+    # 2. Generar paquetes virtuales si hay bultos
+    paquetes_info = []
+    if num_paquetes > 0:
+        logger.info("📦 Generando %s bultos virtuales", num_paquetes)
+        for i in range(1, num_paquetes + 1):
+            paquetes_info.append({"name": f"Caja {i}", "id": i})
+        logger.info("📦 Bultos generados: %s", [p["name"] for p in paquetes_info])
+    else:
+        logger.warning("⚠️ packages_count=0. Se enviará como 1 sola pieza.")
+
     ws22_payload = construir_payload_ws22(
-        picking, partner, valor_real=valor_total, contenido=contenido
+        picking,
+        partner,
+        valor_real=valor_total,
+        contenido=contenido,
+        paquetes_info=paquetes_info,
     )
     envio = enviar_ws22_test(ws22_payload)
 
